@@ -39,9 +39,12 @@
 #define TIMEOUT_SEC  1
 #define TIMEOUT_USEC 0
 
-static packet_counter_t pkt_cnt;
-static packet_counter_t total_cnt;
-static pcap_t *handle;
+/* ---- global state ----------------------------------------------------- */
+
+static iface_ctx_t ifaces[MAX_IFACES];
+static int iface_count;
+static char *filter_expr;
+static volatile sig_atomic_t running = 1;
 
 /*
  * Get current time as HH:MM:SS string.
@@ -57,6 +60,24 @@ static void get_time(char *buf, size_t len)
 }
 
 /*
+ * Accumulate per-second counters into totals for one interface.
+ */
+static void accumulate_totals(iface_ctx_t *ctx)
+{
+    ctx->total_cnt.all  += ctx->pkt_cnt.all;
+    ctx->total_cnt.ip   += ctx->pkt_cnt.ip;
+    ctx->total_cnt.ipv6 += ctx->pkt_cnt.ipv6;
+    ctx->total_cnt.arp  += ctx->pkt_cnt.arp;
+    ctx->total_cnt.icmp += ctx->pkt_cnt.icmp;
+    ctx->total_cnt.tcp  += ctx->pkt_cnt.tcp;
+    ctx->total_cnt.udp  += ctx->pkt_cnt.udp;
+    ctx->total_cnt.bps  += ctx->pkt_cnt.bps;
+    ctx->elapsed_sec++;
+
+    memset(&ctx->pkt_cnt, 0, sizeof(ctx->pkt_cnt));
+}
+
+/*
  * SIGALRM handler: print stats every second, header every INTVAL seconds.
  * Used only in text mode.
  */
@@ -64,24 +85,39 @@ static void alarm_handler(int sig)
 {
     char timebuf[16];
     static int sec = 1;
+    int i;
 
     (void)sig;
 
     get_time(timebuf, sizeof(timebuf));
 
     if ((sec % INTVAL) == 1) {
-        printf("# time #\t  all\t ipv4\t ipv6\tarp\ticmp\ttcp\tudp\n");
+        if (iface_count > 1)
+            printf("# time #\tiface\t  all\t ipv4\t ipv6\tarp\ticmp"
+                   "\ttcp\tudp\n");
+        else
+            printf("# time #\t  all\t ipv4\t ipv6\tarp\ticmp\ttcp\tudp\n");
         sec = 1;
     }
 
-    printf("%s\t%5d\t%5d\t%5d\t%3d\t%3d\t%5d\t%5d%6.1fkbps\n",
-           timebuf, pkt_cnt.all, pkt_cnt.ip,
-           pkt_cnt.ipv6, pkt_cnt.arp, pkt_cnt.icmp,
-           pkt_cnt.tcp, pkt_cnt.udp, (double)pkt_cnt.bps * 8 / 1024);
+    for (i = 0; i < iface_count; i++) {
+        packet_counter_t *c = &ifaces[i].pkt_cnt;
+        if (iface_count > 1)
+            printf("%s\t%s\t%5d\t%5d\t%5d\t%3d\t%3d\t%5d\t%5d%6.1fkbps\n",
+                   timebuf, ifaces[i].name,
+                   c->all, c->ip, c->ipv6, c->arp, c->icmp,
+                   c->tcp, c->udp, (double)c->bps * 8 / 1024);
+        else
+            printf("%s\t%5d\t%5d\t%5d\t%3d\t%3d\t%5d\t%5d%6.1fkbps\n",
+                   timebuf,
+                   c->all, c->ip, c->ipv6, c->arp, c->icmp,
+                   c->tcp, c->udp, (double)c->bps * 8 / 1024);
+    }
 
     sec++;
 
-    memset(&pkt_cnt, 0, sizeof(pkt_cnt));
+    for (i = 0; i < iface_count; i++)
+        accumulate_totals(&ifaces[i]);
 }
 
 /*
@@ -103,34 +139,34 @@ static void setup_timer(void)
 
 /*
  * pcap callback: parse each captured packet and update counters.
+ * The user pointer points to the iface_ctx_t's pkt_cnt.
  */
 static void packet_handler(u_char *user, const struct pcap_pkthdr *header,
                            const u_char *packet)
 {
+    packet_counter_t *cnt = (packet_counter_t *)user;
     const struct ether_header *eth;
     const struct ip *iph;
     uint16_t ether_type;
 
-    (void)user;
-
     if (header->caplen < sizeof(struct ether_header))
         return;
 
-    pkt_cnt.all++;
-    pkt_cnt.bps += header->len;
+    cnt->all++;
+    cnt->bps += header->len;
 
     eth = (const struct ether_header *)packet;
     ether_type = ntohs(eth->ether_type);
 
     switch (ether_type) {
     case ETHERTYPE_IP:
-        pkt_cnt.ip++;
+        cnt->ip++;
         break;
     case ETHERTYPE_IPV6:
-        pkt_cnt.ipv6++;
+        cnt->ipv6++;
         return;
     case ETHERTYPE_ARP:
-        pkt_cnt.arp++;
+        cnt->arp++;
         return;
     default:
         return;
@@ -144,30 +180,15 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *header,
 
     switch (iph->ip_p) {
     case IPPROTO_ICMP:
-        pkt_cnt.icmp++;
+        cnt->icmp++;
         break;
     case IPPROTO_TCP:
-        pkt_cnt.tcp++;
+        cnt->tcp++;
         break;
     case IPPROTO_UDP:
-        pkt_cnt.udp++;
+        cnt->udp++;
         break;
     }
-}
-
-/*
- * Accumulate per-second counters into totals.
- */
-static void accumulate_totals(void)
-{
-    total_cnt.all  += pkt_cnt.all;
-    total_cnt.ip   += pkt_cnt.ip;
-    total_cnt.ipv6 += pkt_cnt.ipv6;
-    total_cnt.arp  += pkt_cnt.arp;
-    total_cnt.icmp += pkt_cnt.icmp;
-    total_cnt.tcp  += pkt_cnt.tcp;
-    total_cnt.udp  += pkt_cnt.udp;
-    total_cnt.bps  += pkt_cnt.bps;
 }
 
 /*
@@ -175,11 +196,50 @@ static void accumulate_totals(void)
  */
 static void cleanup_handler(int sig)
 {
+    int i;
     (void)sig;
 
-    if (handle) {
-        pcap_breakloop(handle);
+    running = 0;
+    for (i = 0; i < iface_count; i++)
+        if (ifaces[i].handle)
+            pcap_breakloop(ifaces[i].handle);
+}
+
+/*
+ * Close all pcap handles.
+ */
+static void cleanup_all(void)
+{
+    int i;
+    for (i = 0; i < iface_count; i++) {
+        if (ifaces[i].handle) {
+            pcap_close(ifaces[i].handle);
+            ifaces[i].handle = NULL;
+        }
     }
+}
+
+/*
+ * Apply BPF filter to a pcap handle.
+ * Returns 0 on success, -1 on error.
+ */
+static int apply_filter(pcap_t *h, const char *iface_name, const char *expr)
+{
+    struct bpf_program fp;
+
+    if (pcap_compile(h, &fp, expr, 1, PCAP_NETMASK_UNKNOWN) == -1) {
+        fprintf(stderr, "Filter compile error on %s: %s\n",
+                iface_name, pcap_geterr(h));
+        return -1;
+    }
+    if (pcap_setfilter(h, &fp) == -1) {
+        fprintf(stderr, "Filter set error on %s: %s\n",
+                iface_name, pcap_geterr(h));
+        pcap_freecode(&fp);
+        return -1;
+    }
+    pcap_freecode(&fp);
+    return 0;
 }
 
 /*
@@ -194,16 +254,15 @@ static long long now_ms(void)
 
 #ifdef HAS_NCURSES
 /*
- * TUI mode main loop using pcap_dispatch (non-blocking).
+ * TUI mode main loop using round-robin pcap_dispatch (non-blocking).
  */
-static int run_tui(const char *device, const char *dir_str)
+static int run_tui(const char *dir_str)
 {
-    int elapsed = 0;
     int paused = 0;
     long long last_tick;
-    int action;
+    int action, i;
 
-    if (tui_init(device, dir_str) < 0)
+    if (tui_init(ifaces, iface_count, dir_str) < 0)
         return 1;
 
     /* Disable SIGALRM in TUI mode */
@@ -212,27 +271,29 @@ static int run_tui(const char *device, const char *dir_str)
     signal(SIGINT,  cleanup_handler);
     signal(SIGTERM, cleanup_handler);
 
-    memset(&pkt_cnt, 0, sizeof(pkt_cnt));
-    memset(&total_cnt, 0, sizeof(total_cnt));
-
     /* Initial draw */
-    tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
+    tui_update(ifaces, iface_count, paused);
 
     last_tick = now_ms();
 
     for (;;) {
-        /* Process packets (non-blocking, pcap timeout handles ~100ms) */
-        if (pcap_dispatch(handle, -1, packet_handler, NULL) == PCAP_ERROR_BREAK)
-            break;
+        /* Round-robin dispatch across all interfaces */
+        for (i = 0; i < iface_count; i++) {
+            int ret = pcap_dispatch(ifaces[i].handle, -1, packet_handler,
+                                    (u_char *)&ifaces[i].pkt_cnt);
+            if (ret == PCAP_ERROR_BREAK) {
+                tui_cleanup();
+                return 0;
+            }
+        }
 
         /* Check for 1-second tick */
         if (now_ms() - last_tick >= 1000) {
             last_tick += 1000;
             if (!paused) {
-                elapsed++;
-                accumulate_totals();
-                tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
-                memset(&pkt_cnt, 0, sizeof(pkt_cnt));
+                for (i = 0; i < iface_count; i++)
+                    accumulate_totals(&ifaces[i]);
+                tui_update(ifaces, iface_count, paused);
             }
         }
 
@@ -243,10 +304,12 @@ static int run_tui(const char *device, const char *dir_str)
         if (action == 'p')
             paused = !paused;
         if (action == 'r') {
-            memset(&pkt_cnt, 0, sizeof(pkt_cnt));
-            memset(&total_cnt, 0, sizeof(total_cnt));
-            elapsed = 0;
-            tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
+            for (i = 0; i < iface_count; i++) {
+                memset(&ifaces[i].pkt_cnt, 0, sizeof(packet_counter_t));
+                memset(&ifaces[i].total_cnt, 0, sizeof(packet_counter_t));
+                ifaces[i].elapsed_sec = 0;
+            }
+            tui_update(ifaces, iface_count, paused);
         }
     }
 
@@ -260,14 +323,23 @@ int main(int argc, char *argv[])
     char errbuf[PCAP_ERRBUF_SIZE];
     int direction = 0; /* 0=both, 1=in, 2=out */
     int use_tui = 0;
-    int opt;
-    const char *device = NULL;
+    int opt, i;
     const char *dir_str;
+    int timeout_ms;
 
-    while ((opt = getopt(argc, argv, "d:iouh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:f:iouh")) != -1) {
         switch (opt) {
         case 'd':
-            device = optarg;
+            if (iface_count >= MAX_IFACES) {
+                fprintf(stderr, "Error: max %d interfaces\n", MAX_IFACES);
+                return 1;
+            }
+            snprintf(ifaces[iface_count].name,
+                     sizeof(ifaces[iface_count].name), "%s", optarg);
+            iface_count++;
+            break;
+        case 'f':
+            filter_expr = optarg;
             break;
         case 'i':
             direction = 1;
@@ -281,8 +353,10 @@ int main(int argc, char *argv[])
         case 'h':
         default:
             fprintf(stderr,
-                    "Usage: %s [-d device] [-i|-o] [-u] [-h]\n"
-                    "  -d device   Network interface (default: auto-detect)\n"
+                    "Usage: %s [-d device [-d device2 ...]] [-f filter]"
+                    " [-i|-o] [-u] [-h]\n"
+                    "  -d device   Network interface (repeatable, max %d)\n"
+                    "  -f filter   BPF filter expression (tcpdump syntax)\n"
                     "  -i          Capture incoming packets only\n"
                     "  -o          Capture outgoing packets only\n"
 #ifdef HAS_NCURSES
@@ -291,27 +365,30 @@ int main(int argc, char *argv[])
                     "  -u          TUI mode (not available, build with ncurses)\n"
 #endif
                     "  -h          Show this help\n",
-                    argv[0]);
+                    argv[0], MAX_IFACES);
             return (opt == 'h') ? 0 : 1;
         }
     }
 
     /* Legacy positional argument support: pkt_monitor <device> */
-    if (!device && optind < argc) {
-        device = argv[optind];
+    if (iface_count == 0 && optind < argc) {
+        snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", argv[optind]);
+        iface_count = 1;
     }
 
     /* Auto-detect device if not specified */
-    if (!device) {
+    if (iface_count == 0) {
         pcap_if_t *alldevs;
 
         if (pcap_findalldevs(&alldevs, errbuf) == -1 || alldevs == NULL) {
             fprintf(stderr, "No capture device found: %s\n", errbuf);
             return 1;
         }
-        device = alldevs->name;
+        snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", alldevs->name);
+        iface_count = 1;
+        pcap_freealldevs(alldevs);
         if (!use_tui)
-            printf("# auto-detected device: %s\n", device);
+            printf("# auto-detected device: %s\n", ifaces[0].name);
     }
 
     /* TUI requires ncurses */
@@ -323,32 +400,52 @@ int main(int argc, char *argv[])
 #endif
 
     /*
-     * Open capture device.
-     * promiscuous mode = 1, timeout = 100ms
+     * Open all capture devices.
+     * Adjust timeout per interface for fair round-robin.
      */
-    handle = pcap_open_live(device, SNAP_LEN, 1, 100, errbuf);
-    if (!handle) {
-        fprintf(stderr, "pcap_open_live(%s): %s\n", device, errbuf);
-        return 1;
-    }
+    timeout_ms = 100 / iface_count;
+    if (timeout_ms < 10) timeout_ms = 10;
 
-    /* Verify Ethernet link layer */
-    if (pcap_datalink(handle) != DLT_EN10MB) {
-        fprintf(stderr, "Device %s does not provide Ethernet headers\n", device);
-        pcap_close(handle);
-        return 1;
-    }
+    for (i = 0; i < iface_count; i++) {
+        memset(&ifaces[i].pkt_cnt, 0, sizeof(packet_counter_t));
+        memset(&ifaces[i].total_cnt, 0, sizeof(packet_counter_t));
+        ifaces[i].elapsed_sec = 0;
 
-    /* Set capture direction if requested */
-    if (direction == 1) {
-        if (pcap_setdirection(handle, PCAP_D_IN) == -1) {
-            fprintf(stderr, "Warning: cannot set direction to inbound: %s\n",
-                    pcap_geterr(handle));
+        ifaces[i].handle = pcap_open_live(ifaces[i].name, SNAP_LEN, 1,
+                                          timeout_ms, errbuf);
+        if (!ifaces[i].handle) {
+            fprintf(stderr, "pcap_open_live(%s): %s\n",
+                    ifaces[i].name, errbuf);
+            cleanup_all();
+            return 1;
         }
-    } else if (direction == 2) {
-        if (pcap_setdirection(handle, PCAP_D_OUT) == -1) {
-            fprintf(stderr, "Warning: cannot set direction to outbound: %s\n",
-                    pcap_geterr(handle));
+
+        /* Verify Ethernet link layer */
+        if (pcap_datalink(ifaces[i].handle) != DLT_EN10MB) {
+            fprintf(stderr, "Device %s does not provide Ethernet headers\n",
+                    ifaces[i].name);
+            cleanup_all();
+            return 1;
+        }
+
+        /* Set capture direction if requested */
+        if (direction == 1) {
+            if (pcap_setdirection(ifaces[i].handle, PCAP_D_IN) == -1)
+                fprintf(stderr, "Warning: %s: cannot set direction to inbound: %s\n",
+                        ifaces[i].name, pcap_geterr(ifaces[i].handle));
+        } else if (direction == 2) {
+            if (pcap_setdirection(ifaces[i].handle, PCAP_D_OUT) == -1)
+                fprintf(stderr, "Warning: %s: cannot set direction to outbound: %s\n",
+                        ifaces[i].name, pcap_geterr(ifaces[i].handle));
+        }
+
+        /* Apply BPF filter */
+        if (filter_expr) {
+            if (apply_filter(ifaces[i].handle, ifaces[i].name,
+                             filter_expr) == -1) {
+                cleanup_all();
+                return 1;
+            }
         }
     }
 
@@ -356,24 +453,46 @@ int main(int argc, char *argv[])
 
 #ifdef HAS_NCURSES
     if (use_tui) {
-        int ret = run_tui(device, dir_str);
-        pcap_close(handle);
+        int ret = run_tui(dir_str);
+        cleanup_all();
         return ret;
     }
 #endif
 
     /* Text mode */
-    printf("# Capturing on %s (direction: %s)\n", device, dir_str);
+    if (iface_count == 1) {
+        printf("# Capturing on %s (direction: %s)", ifaces[0].name, dir_str);
+    } else {
+        printf("# Capturing on");
+        for (i = 0; i < iface_count; i++)
+            printf(" %s%s", ifaces[i].name,
+                   i < iface_count - 1 ? "," : "");
+        printf(" (direction: %s)", dir_str);
+    }
+    if (filter_expr)
+        printf(" [filter: %s]", filter_expr);
+    printf("\n");
 
     setup_timer();
 
     signal(SIGINT,  cleanup_handler);
     signal(SIGTERM, cleanup_handler);
 
-    memset(&pkt_cnt, 0, sizeof(pkt_cnt));
-    pcap_loop(handle, -1, packet_handler, NULL);
+    /* Round-robin dispatch */
+    while (running) {
+        for (i = 0; i < iface_count; i++) {
+            int ret = pcap_dispatch(ifaces[i].handle, -1, packet_handler,
+                                    (u_char *)&ifaces[i].pkt_cnt);
+            if (ret == PCAP_ERROR) {
+                fprintf(stderr, "pcap error on %s: %s\n",
+                        ifaces[i].name, pcap_geterr(ifaces[i].handle));
+                running = 0;
+                break;
+            }
+        }
+    }
 
-    pcap_close(handle);
+    cleanup_all();
     printf("\n# Capture stopped.\n");
 
     return 0;
