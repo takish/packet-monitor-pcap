@@ -35,8 +35,9 @@ sudo ./pkt_monitor [-d device] [-i|-o] [-u] [-h]
 
 ### Files
 
-- `pkt_monitor.h`: shared types (`packet_counter_t`) and constants
+- `pkt_monitor.h`: shared types (`packet_counter_t`, `monitor_config_t`) and constants
 - `pkt_monitor.c`: main(), capture logic, text mode output, TUI mode loop
+- `layer_detail.h` / `layer_detail.c`: layer detail mode ring buffer and BPF filter builder
 - `tui.h` / `tui.c`: ncurses TUI rendering (compiled only when ncurses is available)
 
 ### Key sections in pkt_monitor.c
@@ -60,6 +61,7 @@ sudo ./pkt_monitor [-d device] [-i|-o] [-u] [-h]
 - TUI mode uses `pcap_dispatch()` (non-blocking, ~100ms timeout) + `gettimeofday()` timer
 - SIGALRM is disabled in TUI mode to avoid ncurses corruption
 - `#ifdef HAS_NCURSES` guards all ncurses code for conditional compilation
+- `-L` layer mode auto-applies BPF filters (L2=arp, L3=ip/ip6/icmp, L4=tcp/udp) and combines with user `-f` filter via AND
 
 ## Important Notes
 

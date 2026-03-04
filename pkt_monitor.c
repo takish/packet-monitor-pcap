@@ -33,6 +33,7 @@
 #include "pkt_monitor.h"
 #include "output.h"
 #include "stats.h"
+#include "layer_detail.h"
 
 #ifdef HAS_NCURSES
 #include "tui.h"
@@ -510,13 +511,14 @@ static int run_tui(const monitor_config_t *cfg)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [-d device [-d device2 ...]] [-i|-o] [-f filter]\n"
+            "Usage: %s [-d device [-d device2 ...]] [-i|-o] [-f filter] [-L 2|3|4]\n"
             "       %s [-r file] [-w file] [-u] [-j|-c] [-t secs] [-l logfile] [-a kbps] [-T N] [-h]\n"
             "\n"
             "  -d device   Network interface (repeatable, max %d)\n"
             "  -i          Capture incoming packets only\n"
             "  -o          Capture outgoing packets only\n"
             "  -f filter   BPF filter expression (tcpdump syntax)\n"
+            "  -L 2|3|4    Layer detail mode (2=ARP, 3=IP/ICMP, 4=TCP/UDP)\n"
             "  -r file     Read packets from pcap file (offline mode)\n"
             "  -w file     Write captured packets to pcap file\n"
 #ifdef HAS_NCURSES
@@ -547,7 +549,7 @@ int main(int argc, char *argv[])
     memset(&cfg, 0, sizeof(cfg));
     cfg.interval_ms = 1000;
 
-    while ((opt = getopt(argc, argv, "d:iof:r:w:jt:l:ca:T:upn:h")) != -1) {
+    while ((opt = getopt(argc, argv, "d:iof:r:w:jt:l:L:ca:T:upn:h")) != -1) {
         switch (opt) {
         case 'd':
             if (iface_count >= MAX_IFACES) {
@@ -600,6 +602,14 @@ int main(int argc, char *argv[])
         case 'w':
             cfg.write_file = optarg;
             break;
+        case 'L':
+            cfg.layer_mode = atoi(optarg);
+            if (cfg.layer_mode != 2 && cfg.layer_mode != 3 &&
+                cfg.layer_mode != 4) {
+                fprintf(stderr, "Error: -L requires 2, 3, or 4\n");
+                return 1;
+            }
+            break;
         case 'u':
             cfg.use_tui = 1;
             break;
@@ -624,6 +634,10 @@ int main(int argc, char *argv[])
     }
 
     /* Validate mutually exclusive options */
+    if (cfg.layer_mode && (cfg.json_mode || cfg.csv_mode)) {
+        fprintf(stderr, "Error: -L cannot be combined with -j or -c\n");
+        return 1;
+    }
     if (cfg.use_tui && (cfg.json_mode || cfg.csv_mode)) {
         fprintf(stderr, "Error: -u cannot be combined with -j or -c\n");
         return 1;
@@ -650,10 +664,24 @@ int main(int argc, char *argv[])
         }
         snprintf(ifaces[0].name, sizeof(ifaces[0].name), "file");
         iface_count = 1;
-        if (cfg.filter_expr) {
-            if (apply_filter(ifaces[0].handle, "file", cfg.filter_expr) == -1) {
-                cleanup_all();
-                return 1;
+        {
+            char layer_fbuf[512];
+            const char *effective_filter = cfg.filter_expr;
+
+            if (cfg.layer_mode) {
+                const char *lf = layer_build_filter(
+                    cfg.layer_mode, cfg.filter_expr,
+                    layer_fbuf, sizeof(layer_fbuf));
+                if (lf)
+                    effective_filter = lf;
+            }
+
+            if (effective_filter) {
+                if (apply_filter(ifaces[0].handle, "file",
+                                 effective_filter) == -1) {
+                    cleanup_all();
+                    return 1;
+                }
             }
         }
     } else {
@@ -727,12 +755,25 @@ int main(int argc, char *argv[])
                             ifaces[i].name, pcap_geterr(ifaces[i].handle));
             }
 
-            /* Apply BPF filter */
-            if (cfg.filter_expr) {
-                if (apply_filter(ifaces[i].handle, ifaces[i].name,
-                                 cfg.filter_expr) == -1) {
-                    cleanup_all();
-                    return 1;
+            /* Apply BPF filter (layer mode auto-filter + user filter) */
+            {
+                char layer_fbuf[512];
+                const char *effective_filter = cfg.filter_expr;
+
+                if (cfg.layer_mode) {
+                    const char *lf = layer_build_filter(
+                        cfg.layer_mode, cfg.filter_expr,
+                        layer_fbuf, sizeof(layer_fbuf));
+                    if (lf)
+                        effective_filter = lf;
+                }
+
+                if (effective_filter) {
+                    if (apply_filter(ifaces[i].handle, ifaces[i].name,
+                                     effective_filter) == -1) {
+                        cleanup_all();
+                        return 1;
+                    }
                 }
             }
         }
@@ -806,6 +847,8 @@ int main(int argc, char *argv[])
                    i < iface_count - 1 ? "," : "");
         printf(" (direction: %s)", dir_str);
     }
+    if (cfg.layer_mode)
+        printf(" [L%d detail]", cfg.layer_mode);
     if (cfg.filter_expr)
         printf(" [filter: %s]", cfg.filter_expr);
     if (cfg.no_promisc)

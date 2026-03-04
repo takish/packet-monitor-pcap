@@ -4,7 +4,7 @@ CFLAGS  = -O2 -g -Wall -Wextra -Werror
 LDFLAGS = -lpcap
 PREFIX ?= /usr/local
 
-SRCS = pkt_monitor.c output.c stats.c
+SRCS = pkt_monitor.c output.c stats.c layer_detail.c
 OBJS = $(SRCS:.c=.o)
 
 # Auto-detect ncurses
@@ -37,6 +37,9 @@ output.o: output.c output.h pkt_monitor.h
 	$(CC) $(CFLAGS) -c $<
 
 stats.o: stats.c stats.h
+	$(CC) $(CFLAGS) -c $<
+
+layer_detail.o: layer_detail.c layer_detail.h
 	$(CC) $(CFLAGS) -c $<
 
 clean:
