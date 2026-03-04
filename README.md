@@ -12,6 +12,7 @@ Based on the [original Linux-only version](https://github.com/takish/packet-moni
 ## Requirements
 
 - libpcap (macOS: pre-installed, Linux: `apt install libpcap-dev` or `yum install libpcap-devel`)
+- ncurses (optional, for TUI mode; macOS: pre-installed, Linux: `apt install libncurses-dev`)
 
 ## Build
 
@@ -38,6 +39,9 @@ sudo ./pkt_monitor -d en0 -i
 # Outgoing packets only
 sudo ./pkt_monitor -d en0 -o
 
+# TUI mode (ncurses)
+sudo ./pkt_monitor -d en0 -u
+
 # Show help
 ./pkt_monitor -h
 ```
@@ -55,6 +59,28 @@ sudo make install   # installs to /usr/local/bin/pkt_monitor
 # time #	  all	 ipv4	 ipv6	arp	icmp	tcp	udp
 12:34:56	   42	   30	    8	  4	   2	   20	    8  23.4kbps
 12:34:57	   38	   28	    7	  3	   1	   19	    8  20.1kbps
+```
+
+## TUI Mode
+
+Use `-u` to launch the ncurses-based TUI. Requires ncurses (auto-detected at build time).
+
+```
+┌ pkt_monitor ── en0 ── both ── 00:01:23 ────────────────┐
+│                                                         │
+│  Proto    pkt/s      Total   Bandwidth          kbps    │
+│  ──────── ──────── ──────── ──────────────── ────────   │
+│  IPv4        30      1,234  ████████████░░░  23.4 kbps  │
+│  IPv6         8        200  ███░░░░░░░░░░░░   6.2 kbps  │
+│  ARP          4         54  █░░░░░░░░░░░░░░   0.3 kbps  │
+│  ICMP         2         45  ░░░░░░░░░░░░░░░   0.2 kbps  │
+│  TCP         20        800  ██████████░░░░░  15.6 kbps  │
+│  UDP          8        400  ████░░░░░░░░░░░   6.2 kbps  │
+│  ──────── ──────── ──────── ──────────────── ────────   │
+│  ALL         42      1,488                   29.4 kbps  │
+│                                                         │
+│  [q] Quit  [p] Pause  [r] Reset counters                │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Differences from original

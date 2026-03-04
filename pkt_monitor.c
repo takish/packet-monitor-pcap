@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #include <pcap/pcap.h>
 
@@ -29,22 +30,17 @@
 #include <netinet/ether.h>
 #endif
 
-#define TIMEOUT_SEC  1
-#define INTVAL       10
-#define SNAP_LEN     1600
+#include "pkt_monitor.h"
 
-typedef struct {
-    int all;
-    int ip;
-    int ipv6;
-    int arp;
-    int icmp;
-    int tcp;
-    int udp;
-    int bps;
-} packet_counter_t;
+#ifdef HAS_NCURSES
+#include "tui.h"
+#endif
+
+#define TIMEOUT_SEC  1
+#define TIMEOUT_USEC 0
 
 static packet_counter_t pkt_cnt;
+static packet_counter_t total_cnt;
 static pcap_t *handle;
 
 /*
@@ -62,6 +58,7 @@ static void get_time(char *buf, size_t len)
 
 /*
  * SIGALRM handler: print stats every second, header every INTVAL seconds.
+ * Used only in text mode.
  */
 static void alarm_handler(int sig)
 {
@@ -88,7 +85,7 @@ static void alarm_handler(int sig)
 }
 
 /*
- * Set up SIGALRM timer for periodic stats output.
+ * Set up SIGALRM timer for periodic stats output (text mode only).
  */
 static void setup_timer(void)
 {
@@ -97,9 +94,9 @@ static void setup_timer(void)
     signal(SIGALRM, alarm_handler);
 
     timer.it_interval.tv_sec  = TIMEOUT_SEC;
-    timer.it_interval.tv_usec = 0;
+    timer.it_interval.tv_usec = TIMEOUT_USEC;
     timer.it_value.tv_sec     = TIMEOUT_SEC;
-    timer.it_value.tv_usec    = 0;
+    timer.it_value.tv_usec    = TIMEOUT_USEC;
 
     setitimer(ITIMER_REAL, &timer, NULL);
 }
@@ -159,6 +156,21 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *header,
 }
 
 /*
+ * Accumulate per-second counters into totals.
+ */
+static void accumulate_totals(void)
+{
+    total_cnt.all  += pkt_cnt.all;
+    total_cnt.ip   += pkt_cnt.ip;
+    total_cnt.ipv6 += pkt_cnt.ipv6;
+    total_cnt.arp  += pkt_cnt.arp;
+    total_cnt.icmp += pkt_cnt.icmp;
+    total_cnt.tcp  += pkt_cnt.tcp;
+    total_cnt.udp  += pkt_cnt.udp;
+    total_cnt.bps  += pkt_cnt.bps;
+}
+
+/*
  * SIGINT/SIGTERM handler: clean shutdown.
  */
 static void cleanup_handler(int sig)
@@ -170,14 +182,89 @@ static void cleanup_handler(int sig)
     }
 }
 
+/*
+ * Get current time in milliseconds (monotonic).
+ */
+static long long now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+#ifdef HAS_NCURSES
+/*
+ * TUI mode main loop using pcap_dispatch (non-blocking).
+ */
+static int run_tui(const char *device, const char *dir_str)
+{
+    int elapsed = 0;
+    int paused = 0;
+    long long last_tick;
+    int action;
+
+    if (tui_init(device, dir_str) < 0)
+        return 1;
+
+    /* Disable SIGALRM in TUI mode */
+    signal(SIGALRM, SIG_IGN);
+
+    signal(SIGINT,  cleanup_handler);
+    signal(SIGTERM, cleanup_handler);
+
+    memset(&pkt_cnt, 0, sizeof(pkt_cnt));
+    memset(&total_cnt, 0, sizeof(total_cnt));
+
+    /* Initial draw */
+    tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
+
+    last_tick = now_ms();
+
+    for (;;) {
+        /* Process packets (non-blocking, pcap timeout handles ~100ms) */
+        if (pcap_dispatch(handle, -1, packet_handler, NULL) == PCAP_ERROR_BREAK)
+            break;
+
+        /* Check for 1-second tick */
+        if (now_ms() - last_tick >= 1000) {
+            last_tick += 1000;
+            if (!paused) {
+                elapsed++;
+                accumulate_totals();
+                tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
+                memset(&pkt_cnt, 0, sizeof(pkt_cnt));
+            }
+        }
+
+        /* Handle keyboard input */
+        action = tui_handle_input();
+        if (action == 'q')
+            break;
+        if (action == 'p')
+            paused = !paused;
+        if (action == 'r') {
+            memset(&pkt_cnt, 0, sizeof(pkt_cnt));
+            memset(&total_cnt, 0, sizeof(total_cnt));
+            elapsed = 0;
+            tui_update(&pkt_cnt, &total_cnt, elapsed, paused);
+        }
+    }
+
+    tui_cleanup();
+    return 0;
+}
+#endif /* HAS_NCURSES */
+
 int main(int argc, char *argv[])
 {
     char errbuf[PCAP_ERRBUF_SIZE];
     int direction = 0; /* 0=both, 1=in, 2=out */
+    int use_tui = 0;
     int opt;
     const char *device = NULL;
+    const char *dir_str;
 
-    while ((opt = getopt(argc, argv, "d:ioh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:iouh")) != -1) {
         switch (opt) {
         case 'd':
             device = optarg;
@@ -188,13 +275,21 @@ int main(int argc, char *argv[])
         case 'o':
             direction = 2;
             break;
+        case 'u':
+            use_tui = 1;
+            break;
         case 'h':
         default:
             fprintf(stderr,
-                    "Usage: %s [-d device] [-i|-o] [-h]\n"
+                    "Usage: %s [-d device] [-i|-o] [-u] [-h]\n"
                     "  -d device   Network interface (default: auto-detect)\n"
                     "  -i          Capture incoming packets only\n"
                     "  -o          Capture outgoing packets only\n"
+#ifdef HAS_NCURSES
+                    "  -u          TUI mode (ncurses)\n"
+#else
+                    "  -u          TUI mode (not available, build with ncurses)\n"
+#endif
                     "  -h          Show this help\n",
                     argv[0]);
             return (opt == 'h') ? 0 : 1;
@@ -215,9 +310,17 @@ int main(int argc, char *argv[])
             return 1;
         }
         device = alldevs->name;
-        printf("# auto-detected device: %s\n", device);
-        /* Note: alldevs memory is intentionally kept alive for device pointer */
+        if (!use_tui)
+            printf("# auto-detected device: %s\n", device);
     }
+
+    /* TUI requires ncurses */
+#ifndef HAS_NCURSES
+    if (use_tui) {
+        fprintf(stderr, "TUI mode not available. Rebuild with ncurses support.\n");
+        return 1;
+    }
+#endif
 
     /*
      * Open capture device.
@@ -249,20 +352,27 @@ int main(int argc, char *argv[])
         }
     }
 
-    printf("# Capturing on %s (direction: %s)\n", device,
-           direction == 0 ? "both" : direction == 1 ? "in" : "out");
+    dir_str = direction == 0 ? "both" : direction == 1 ? "in" : "out";
 
-    /* Set up periodic timer and signal handlers */
+#ifdef HAS_NCURSES
+    if (use_tui) {
+        int ret = run_tui(device, dir_str);
+        pcap_close(handle);
+        return ret;
+    }
+#endif
+
+    /* Text mode */
+    printf("# Capturing on %s (direction: %s)\n", device, dir_str);
+
     setup_timer();
 
     signal(SIGINT,  cleanup_handler);
     signal(SIGTERM, cleanup_handler);
 
-    /* Main capture loop */
     memset(&pkt_cnt, 0, sizeof(pkt_cnt));
     pcap_loop(handle, -1, packet_handler, NULL);
 
-    /* Cleanup */
     pcap_close(handle);
     printf("\n# Capture stopped.\n");
 
