@@ -2,6 +2,7 @@ PACKAGE = pkt_monitor
 CC      = cc
 CFLAGS  = -O2 -g -Wall -Wextra -Werror
 LDFLAGS = -lpcap
+PREFIX ?= /usr/local
 
 SRCS = pkt_monitor.c
 OBJS = $(SRCS:.c=.o)
@@ -36,6 +37,7 @@ clean:
 	rm -f $(PACKAGE) $(OBJS) tui.o
 
 install: $(PACKAGE)
-	install -m 755 $(PACKAGE) /usr/local/bin/
+	install -d $(PREFIX)/bin
+	install -m 755 $(PACKAGE) $(PREFIX)/bin/
 
 .PHONY: all clean install
