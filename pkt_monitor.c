@@ -256,29 +256,29 @@ static void print_text_lines(int *header_count)
 
     if ((*header_count % INTVAL) == 0) {
         if (iface_count > 1)
-            printf("# time #\tiface\t  all\t arp\t ipv4\t ipv6\ticmp"
-                   "\ttcp\tudp\n");
+            printf("# time #\tiface\t  all\t  tcp\t  udp\t ipv4\t ipv6"
+                   "\ticmp\tarp\n");
         else
-            printf("# time #\t  all\t arp\t ipv4\t ipv6\ticmp\ttcp\tudp\n");
+            printf("# time #\t  all\t  tcp\t  udp\t ipv4\t ipv6\ticmp\tarp\n");
     }
     (*header_count)++;
 
     for (i = 0; i < iface_count; i++) {
         packet_counter_t *c = &ifaces[i].pkt_cnt;
         if (iface_count > 1)
-            printf("%s\t%s\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
-                   "\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
-                   "\t%5" PRIu32 "%6.1fkbps\n",
+            printf("%s\t%s\t%5" PRIu32 "\t%5" PRIu32 "\t%5" PRIu32
+                   "\t%5" PRIu32 "\t%5" PRIu32 "\t%3" PRIu32
+                   "\t%3" PRIu32 "%6.1fkbps\n",
                    timebuf, ifaces[i].name,
-                   c->all, c->arp, c->ip, c->ipv6, c->icmp,
-                   c->tcp, c->udp, (double)c->bytes * 8.0 / 1024.0);
+                   c->all, c->tcp, c->udp, c->ip, c->ipv6, c->icmp,
+                   c->arp, (double)c->bytes * 8.0 / 1024.0);
         else
-            printf("%s\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
-                   "\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
-                   "\t%5" PRIu32 "%6.1fkbps\n",
+            printf("%s\t%5" PRIu32 "\t%5" PRIu32 "\t%5" PRIu32
+                   "\t%5" PRIu32 "\t%5" PRIu32 "\t%3" PRIu32
+                   "\t%3" PRIu32 "%6.1fkbps\n",
                    timebuf,
-                   c->all, c->arp, c->ip, c->ipv6, c->icmp,
-                   c->tcp, c->udp, (double)c->bytes * 8.0 / 1024.0);
+                   c->all, c->tcp, c->udp, c->ip, c->ipv6, c->icmp,
+                   c->arp, (double)c->bytes * 8.0 / 1024.0);
     }
 }
 
