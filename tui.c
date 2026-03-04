@@ -354,6 +354,157 @@ void tui_update(iface_ctx_t *ifaces, int iface_count,
     refresh();
 }
 
+/*
+ * Draw layer detail counters in the upper area.
+ * Returns the next available row.
+ */
+static int draw_detail_counters(int start_row, const detail_ctx_t *ctx,
+                                const monitor_config_t *cfg)
+{
+    int row = start_row;
+
+    if (cfg->layer_mode == 2) {
+        attron(A_BOLD);
+        mvprintw(row, 2, "ARP Counters:");
+        attroff(A_BOLD);
+        row++;
+        mvprintw(row, 4, "Request: %7" PRIu32 "  Reply: %7" PRIu32
+                 "  Other: %7" PRIu32,
+                 ctx->l2.request, ctx->l2.reply, ctx->l2.other);
+        row++;
+    } else if (cfg->layer_mode == 3) {
+        attron(A_BOLD);
+        mvprintw(row, 2, "IP/ICMP Counters:");
+        attroff(A_BOLD);
+        row++;
+        mvprintw(row, 4, "IPv4: %7" PRIu32 "  IPv6: %7" PRIu32
+                 "  ICMP: %7" PRIu32,
+                 ctx->l3.ipv4, ctx->l3.ipv6, ctx->l3.icmp);
+        row++;
+    } else if (cfg->layer_mode == 4) {
+        attron(A_BOLD);
+        mvprintw(row, 2, "TCP/UDP Counters:");
+        attroff(A_BOLD);
+        row++;
+        mvprintw(row, 4, "TCP: %7" PRIu32 "  UDP: %7" PRIu32,
+                 ctx->l4.tcp_total, ctx->l4.udp_total);
+        row++;
+        attron(A_DIM);
+        mvprintw(row, 4, "SYN:%u S/A:%u ACK:%u FIN:%u RST:%u PSH:%u",
+                 ctx->l4.tcp_syn, ctx->l4.tcp_synack,
+                 ctx->l4.tcp_ack, ctx->l4.tcp_fin,
+                 ctx->l4.tcp_rst, ctx->l4.tcp_psh);
+        attroff(A_DIM);
+        row++;
+    } else if (cfg->resolve_mode == 'a') {
+        attron(A_BOLD);
+        mvprintw(row, 2, "ARP Resolve:");
+        attroff(A_BOLD);
+        row++;
+        mvprintw(row, 4, "Req: %u  Reply: %u  Matched: %u  Timeout: %u  Grat: %u",
+                 ctx->arp_res.counter.requests,
+                 ctx->arp_res.counter.replies,
+                 ctx->arp_res.counter.matched,
+                 ctx->arp_res.counter.timeouts,
+                 ctx->arp_res.counter.gratuitous);
+        row++;
+    } else if (cfg->resolve_mode == 'd') {
+        attron(A_BOLD);
+        mvprintw(row, 2, "DNS Resolve:");
+        attroff(A_BOLD);
+        row++;
+        mvprintw(row, 4, "Q: %u  R: %u  Match: %u  Timeout: %u  NX: %u  Err: %u",
+                 ctx->dns_res.counter.queries,
+                 ctx->dns_res.counter.responses,
+                 ctx->dns_res.counter.matched,
+                 ctx->dns_res.counter.timeouts,
+                 ctx->dns_res.counter.nxdomain,
+                 ctx->dns_res.counter.errors);
+        row++;
+    }
+
+    /* Separator */
+    mvhline(row, 1, ACS_HLINE, COLS - 2);
+    row++;
+
+    return row;
+}
+
+/*
+ * Draw ring buffer entries in the lower area.
+ */
+static void draw_ring_buffer(int start_row, int max_rows,
+                             const detail_ring_t *ring)
+{
+    int i, row;
+    int show_count;
+
+    show_count = ring->count;
+    if (show_count > max_rows)
+        show_count = max_rows;
+
+    /* Show most recent entries (from bottom) */
+    int offset = ring->count - show_count;
+
+    for (i = 0; i < show_count; i++) {
+        const detail_entry_t *e = detail_ring_get(ring, offset + i);
+        row = start_row + i;
+        if (row >= LINES - 2) break;
+        if (e) {
+            attron(COLOR_PAIR(4));
+            mvprintw(row, 2, "%-*.*s", COLS - 4, COLS - 4, e->line);
+            attroff(COLOR_PAIR(4));
+        }
+    }
+}
+
+void tui_update_detail(const detail_ctx_t *ctx, int elapsed_sec,
+                       int paused, const monitor_config_t *cfg)
+{
+    int row;
+    char title[64];
+
+    if (needs_resize) {
+        needs_resize = 0;
+        endwin();
+        refresh();
+    }
+
+    erase();
+
+    /* Build title */
+    if (cfg->layer_mode)
+        snprintf(title, sizeof(title), "L%d detail", cfg->layer_mode);
+    else if (cfg->resolve_mode == 'a')
+        snprintf(title, sizeof(title), "ARP resolve");
+    else if (cfg->resolve_mode == 'd')
+        snprintf(title, sizeof(title), "DNS resolve");
+    else
+        snprintf(title, sizeof(title), "detail");
+
+    row = draw_header(title, elapsed_sec, paused, cfg);
+
+    /* Draw counters */
+    row = draw_detail_counters(row, ctx, cfg);
+    row++;
+
+    /* Draw ring buffer (fill remaining space) */
+    {
+        int max_rows = LINES - row - 3;
+        if (max_rows > 0)
+            draw_ring_buffer(row, max_rows, &ctx->ring);
+    }
+
+    /* Footer */
+    row = LINES - 2;
+    mvhline(row - 1, 1, ACS_HLINE, COLS - 2);
+    attron(A_DIM);
+    mvprintw(row, 2, "[q] Quit  [p] Pause  [r] Reset counters");
+    attroff(A_DIM);
+
+    refresh();
+}
+
 int tui_handle_input(void)
 {
     int ch = getch();

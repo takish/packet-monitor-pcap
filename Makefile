@@ -1,10 +1,10 @@
 PACKAGE = pkt_monitor
 CC      = cc
 CFLAGS  = -O2 -g -Wall -Wextra -Werror
-LDFLAGS = -lpcap
+LDFLAGS = -lpcap -lpthread
 PREFIX ?= /usr/local
 
-SRCS = pkt_monitor.c output.c stats.c layer_detail.c
+SRCS = pkt_monitor.c output.c stats.c layer_detail.c dns_parse.c prometheus.c
 OBJS = $(SRCS:.c=.o)
 
 # Auto-detect ncurses
@@ -40,6 +40,12 @@ stats.o: stats.c stats.h
 	$(CC) $(CFLAGS) -c $<
 
 layer_detail.o: layer_detail.c layer_detail.h
+	$(CC) $(CFLAGS) -c $<
+
+dns_parse.o: dns_parse.c dns_parse.h
+	$(CC) $(CFLAGS) -c $<
+
+prometheus.o: prometheus.c prometheus.h pkt_monitor.h
 	$(CC) $(CFLAGS) -c $<
 
 clean:

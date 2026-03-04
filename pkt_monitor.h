@@ -47,7 +47,15 @@ typedef struct {
     const char *write_file;     /* -w: pcap output file */
     const char *read_file;      /* -r: pcap input file */
     int         layer_mode;     /* -L: 0=all, 2/3/4=layer detail */
+    int         resolve_mode;   /* -R: 0=none, 'a'=arp, 'd'=dns */
+    int         prometheus_port; /* --prometheus: 0=disabled */
 } monitor_config_t;
+
+/*
+ * Look up well-known port service name.
+ * Returns NULL if port is not in the table.
+ */
+const char *port_service_name(uint16_t port);
 
 static inline void get_time_str(char *buf, size_t len)
 {
