@@ -102,6 +102,8 @@ static int draw_header(const char *title, int elapsed_sec, int paused,
     mvprintw(row, 1, " pkt_monitor");
     attroff(A_BOLD);
     printw("  %s  %s  %02d:%02d:%02d", title, tui_direction, h, m, s);
+    if (!cfg->no_promisc)
+        printw("  [promisc]");
 
     /* Duration remaining */
     if (cfg->duration > 0) {
@@ -197,11 +199,26 @@ static int draw_single_iface(iface_ctx_t *ctx, int start_row,
     mvhline(row, 2, ACS_HLINE, COLS - 4);
     row++;
 
-    /* Protocol rows */
+    /* Protocol rows - OSI layer order */
+    /* L2 */
+    attron(A_DIM);
+    mvprintw(row, 2, "\342\224\200\342\224\200 L2 \342\224\200\342\224\200");
+    attroff(A_DIM);
+    row++;
+    draw_row(row++, "ARP",   cur->arp,  total->arp,  kbps_arp,  max_kbps, bar_width);
+    /* L3 */
+    attron(A_DIM);
+    mvprintw(row, 2, "\342\224\200\342\224\200 L3 \342\224\200\342\224\200");
+    attroff(A_DIM);
+    row++;
     draw_row(row++, "IPv4",  cur->ip,   total->ip,   kbps_ip,   max_kbps, bar_width);
     draw_row(row++, "IPv6",  cur->ipv6, total->ipv6, kbps_ipv6, max_kbps, bar_width);
-    draw_row(row++, "ARP",   cur->arp,  total->arp,  kbps_arp,  max_kbps, bar_width);
     draw_row(row++, "ICMP",  cur->icmp, total->icmp, kbps_icmp, max_kbps, bar_width);
+    /* L4 */
+    attron(A_DIM);
+    mvprintw(row, 2, "\342\224\200\342\224\200 L4 \342\224\200\342\224\200");
+    attroff(A_DIM);
+    row++;
     draw_row(row++, "TCP",   cur->tcp,  total->tcp,  kbps_tcp,  max_kbps, bar_width);
     draw_row(row++, "UDP",   cur->udp,  total->udp,  kbps_udp,  max_kbps, bar_width);
 
@@ -235,10 +252,10 @@ static int draw_multi_iface(iface_ctx_t *ifaces, int count,
     double total_agg_kbps = 0;
     int i;
 
-    /* Column headers */
+    /* Column headers - OSI layer order: ARP, IPv4, IPv6, ICMP, TCP, UDP */
     attron(A_BOLD);
-    mvprintw(row, 2, "  %-10s %5s %5s %5s %4s %4s %5s %5s %9s",
-             "Iface", "all", "IPv4", "IPv6", "ARP", "ICMP", "TCP", "UDP", "kbps");
+    mvprintw(row, 2, "  %-10s %5s %4s %5s %5s %4s %5s %5s %9s",
+             "Iface", "all", "ARP", "IPv4", "IPv6", "ICMP", "TCP", "UDP", "kbps");
     attroff(A_BOLD);
     row++;
     mvhline(row, 2, ACS_HLINE, COLS - 4);
@@ -251,10 +268,10 @@ static int draw_multi_iface(iface_ctx_t *ifaces, int count,
         total_agg_kbps += kbps;
 
         attron(COLOR_PAIR(4));
-        mvprintw(row, 2, "  %-10s %5" PRIu32 " %5" PRIu32 " %5" PRIu32
-                 " %4" PRIu32 " %4" PRIu32 " %5" PRIu32 " %5" PRIu32,
-                 ifaces[i].name, c->all, c->ip, c->ipv6,
-                 c->arp, c->icmp, c->tcp, c->udp);
+        mvprintw(row, 2, "  %-10s %5" PRIu32 " %4" PRIu32 " %5" PRIu32
+                 " %5" PRIu32 " %4" PRIu32 " %5" PRIu32 " %5" PRIu32,
+                 ifaces[i].name, c->all, c->arp, c->ip, c->ipv6,
+                 c->icmp, c->tcp, c->udp);
         attroff(COLOR_PAIR(4));
         attron(COLOR_PAIR(5));
         printw(" %8.1f", kbps);
@@ -268,8 +285,8 @@ static int draw_multi_iface(iface_ctx_t *ifaces, int count,
     row++;
 
     attron(A_BOLD);
-    mvprintw(row, 2, "  %-10s %5s %5s %5s %4s %4s %5s %5s %9s",
-             "Total", "all", "IPv4", "IPv6", "ARP", "ICMP", "TCP", "UDP", "kbps");
+    mvprintw(row, 2, "  %-10s %5s %4s %5s %5s %4s %5s %5s %9s",
+             "Total", "all", "ARP", "IPv4", "IPv6", "ICMP", "TCP", "UDP", "kbps");
     attroff(A_BOLD);
     row++;
     mvhline(row, 2, ACS_HLINE, COLS - 4);
@@ -281,10 +298,10 @@ static int draw_multi_iface(iface_ctx_t *ifaces, int count,
             ? (double)t->bytes * 8.0 / 1024.0 / ifaces[i].elapsed_sec : 0;
 
         attron(COLOR_PAIR(3));
-        mvprintw(row, 2, "  %-10s %5" PRIu32 " %5" PRIu32 " %5" PRIu32
-                 " %4" PRIu32 " %4" PRIu32 " %5" PRIu32 " %5" PRIu32,
-                 ifaces[i].name, t->all, t->ip, t->ipv6,
-                 t->arp, t->icmp, t->tcp, t->udp);
+        mvprintw(row, 2, "  %-10s %5" PRIu32 " %4" PRIu32 " %5" PRIu32
+                 " %5" PRIu32 " %4" PRIu32 " %5" PRIu32 " %5" PRIu32,
+                 ifaces[i].name, t->all, t->arp, t->ip, t->ipv6,
+                 t->icmp, t->tcp, t->udp);
         attroff(COLOR_PAIR(3));
         attron(COLOR_PAIR(5));
         printw(" %8.1f", kbps);

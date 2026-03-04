@@ -44,6 +44,7 @@ static iface_ctx_t ifaces[MAX_IFACES];
 static int iface_count;
 static volatile sig_atomic_t running = 1;
 static flow_stats_t *g_flow_stats;  /* non-NULL when -T is active */
+static pcap_dumper_t *g_dumper;     /* non-NULL when -w is active */
 
 /*
  * Accumulate per-second counters into totals for one interface.
@@ -99,6 +100,9 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *header,
     if (header->caplen < sizeof(struct ether_header))
         return;
 
+    if (g_dumper)
+        pcap_dump((u_char *)g_dumper, header, packet);
+
     cnt->all++;
     cnt->bytes += header->len;
 
@@ -111,6 +115,26 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *header,
         break;
     case ETHERTYPE_IPV6:
         cnt->ipv6++;
+        /* Parse IPv6 transport layer (simple: no extension header chain) */
+        if (header->caplen >= sizeof(struct ether_header) + sizeof(struct ip6_hdr)) {
+            const struct ip6_hdr *ip6 = (const struct ip6_hdr *)
+                (packet + sizeof(struct ether_header));
+            /* TODO: does not follow IPv6 extension header chain */
+#ifndef IPPROTO_ICMPV6
+#define IPPROTO_ICMPV6 58
+#endif
+            switch (ip6->ip6_nxt) {
+            case IPPROTO_ICMPV6:
+                cnt->icmp++;
+                break;
+            case IPPROTO_TCP:
+                cnt->tcp++;
+                break;
+            case IPPROTO_UDP:
+                cnt->udp++;
+                break;
+            }
+        }
         return;
     case ETHERTYPE_ARP:
         cnt->arp++;
@@ -232,28 +256,28 @@ static void print_text_lines(int *header_count)
 
     if ((*header_count % INTVAL) == 0) {
         if (iface_count > 1)
-            printf("# time #\tiface\t  all\t ipv4\t ipv6\tarp\ticmp"
+            printf("# time #\tiface\t  all\t arp\t ipv4\t ipv6\ticmp"
                    "\ttcp\tudp\n");
         else
-            printf("# time #\t  all\t ipv4\t ipv6\tarp\ticmp\ttcp\tudp\n");
+            printf("# time #\t  all\t arp\t ipv4\t ipv6\ticmp\ttcp\tudp\n");
     }
     (*header_count)++;
 
     for (i = 0; i < iface_count; i++) {
         packet_counter_t *c = &ifaces[i].pkt_cnt;
         if (iface_count > 1)
-            printf("%s\t%s\t%5" PRIu32 "\t%5" PRIu32 "\t%5" PRIu32
-                   "\t%3" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
+            printf("%s\t%s\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
+                   "\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
                    "\t%5" PRIu32 "%6.1fkbps\n",
                    timebuf, ifaces[i].name,
-                   c->all, c->ip, c->ipv6, c->arp, c->icmp,
+                   c->all, c->arp, c->ip, c->ipv6, c->icmp,
                    c->tcp, c->udp, (double)c->bytes * 8.0 / 1024.0);
         else
-            printf("%s\t%5" PRIu32 "\t%5" PRIu32 "\t%5" PRIu32
-                   "\t%3" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
+            printf("%s\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
+                   "\t%5" PRIu32 "\t%3" PRIu32 "\t%5" PRIu32
                    "\t%5" PRIu32 "%6.1fkbps\n",
                    timebuf,
-                   c->all, c->ip, c->ipv6, c->arp, c->icmp,
+                   c->all, c->arp, c->ip, c->ipv6, c->icmp,
                    c->tcp, c->udp, (double)c->bytes * 8.0 / 1024.0);
     }
 }
@@ -301,9 +325,9 @@ static int run_text(const monitor_config_t *cfg)
             }
         }
 
-        /* Check for 1-second tick */
-        if (now_ms() - last_tick >= 1000) {
-            last_tick += 1000;
+        /* Check for interval tick */
+        if (now_ms() - last_tick >= cfg->interval_ms) {
+            last_tick += cfg->interval_ms;
 
             /* Output per-second data */
             if (cfg->json_mode || cfg->csv_mode) {
@@ -433,9 +457,9 @@ static int run_tui(const monitor_config_t *cfg)
             }
         }
 
-        /* Check for 1-second tick */
-        if (now_ms() - last_tick >= 1000) {
-            last_tick += 1000;
+        /* Check for interval tick */
+        if (now_ms() - last_tick >= cfg->interval_ms) {
+            last_tick += cfg->interval_ms;
             if (!paused) {
                 /* Log before accumulate (uses pkt_cnt) */
                 if (logfp) {
@@ -487,18 +511,22 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage: %s [-d device [-d device2 ...]] [-i|-o] [-f filter]\n"
-            "       %s [-u] [-j|-c] [-t secs] [-l logfile] [-a kbps] [-T N] [-h]\n"
+            "       %s [-r file] [-w file] [-u] [-j|-c] [-t secs] [-l logfile] [-a kbps] [-T N] [-h]\n"
             "\n"
             "  -d device   Network interface (repeatable, max %d)\n"
             "  -i          Capture incoming packets only\n"
             "  -o          Capture outgoing packets only\n"
             "  -f filter   BPF filter expression (tcpdump syntax)\n"
+            "  -r file     Read packets from pcap file (offline mode)\n"
+            "  -w file     Write captured packets to pcap file\n"
 #ifdef HAS_NCURSES
             "  -u          TUI mode (ncurses)\n"
 #else
             "  -u          TUI mode (not available, build with ncurses)\n"
 #endif
-            "  -j          JSON output (one line per second)\n"
+            "  -p          Disable promiscuous mode\n"
+            "  -n secs     Output interval in seconds (default 1.0, e.g. 0.5)\n"
+            "  -j          JSON output (one line per interval)\n"
             "  -c          CSV output\n"
             "  -t secs     Stop after N seconds\n"
             "  -l logfile  Write stats to log file\n"
@@ -517,8 +545,9 @@ int main(int argc, char *argv[])
     int timeout_ms;
 
     memset(&cfg, 0, sizeof(cfg));
+    cfg.interval_ms = 1000;
 
-    while ((opt = getopt(argc, argv, "d:iof:jt:l:ca:T:uh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:iof:r:w:jt:l:ca:T:upn:h")) != -1) {
         switch (opt) {
         case 'd':
             if (iface_count >= MAX_IFACES) {
@@ -565,9 +594,28 @@ int main(int argc, char *argv[])
             cfg.top_n = atoi(optarg);
             if (cfg.top_n < 1) cfg.top_n = 1;
             break;
+        case 'r':
+            cfg.read_file = optarg;
+            break;
+        case 'w':
+            cfg.write_file = optarg;
+            break;
         case 'u':
             cfg.use_tui = 1;
             break;
+        case 'p':
+            cfg.no_promisc = 1;
+            break;
+        case 'n': {
+            double secs = atof(optarg);
+            if (secs <= 0) {
+                fprintf(stderr, "Error: -n requires a positive number\n");
+                return 1;
+            }
+            cfg.interval_ms = (int)(secs * 1000);
+            if (cfg.interval_ms < 1) cfg.interval_ms = 1;
+            break;
+        }
         case 'h':
         default:
             usage(argv[0]);
@@ -584,83 +632,119 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: -j and -c are mutually exclusive\n");
         return 1;
     }
-
-    /* Legacy positional argument support: pkt_monitor <device> */
-    if (iface_count == 0 && optind < argc) {
-        snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", argv[optind]);
-        iface_count = 1;
-    }
-
-    /* Auto-detect device if not specified */
-    if (iface_count == 0) {
-        pcap_if_t *alldevs;
-
-        if (pcap_findalldevs(&alldevs, errbuf) == -1 || alldevs == NULL) {
-            fprintf(stderr, "No capture device found: %s\n", errbuf);
-            return 1;
-        }
-        snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", alldevs->name);
-        iface_count = 1;
-        pcap_freealldevs(alldevs);
-        if (!cfg.use_tui)
-            printf("# auto-detected device: %s\n", ifaces[0].name);
-    }
-
-    /* TUI requires ncurses */
-#ifndef HAS_NCURSES
-    if (cfg.use_tui) {
-        fprintf(stderr, "TUI mode not available. Rebuild with ncurses support.\n");
+    if (cfg.read_file && iface_count > 0) {
+        fprintf(stderr, "Error: -r and -d are mutually exclusive\n");
         return 1;
     }
-#endif
+    if (cfg.read_file && cfg.use_tui) {
+        fprintf(stderr, "Error: -r cannot be combined with -u\n");
+        return 1;
+    }
 
-    /*
-     * Open all capture devices.
-     * Adjust timeout per interface for fair round-robin.
-     */
-    timeout_ms = 100 / iface_count;
-    if (timeout_ms < 10) timeout_ms = 10;
-
-    for (i = 0; i < iface_count; i++) {
-        memset(&ifaces[i].pkt_cnt, 0, sizeof(packet_counter_t));
-        memset(&ifaces[i].total_cnt, 0, sizeof(packet_counter_t));
-        ifaces[i].elapsed_sec = 0;
-
-        ifaces[i].handle = pcap_open_live(ifaces[i].name, SNAP_LEN, 1,
-                                          timeout_ms, errbuf);
-        if (!ifaces[i].handle) {
-            fprintf(stderr, "pcap_open_live(%s): %s\n",
-                    ifaces[i].name, errbuf);
-            cleanup_all();
+    if (cfg.read_file) {
+        /* -r mode: open pcap file for offline reading */
+        ifaces[0].handle = pcap_open_offline(cfg.read_file, errbuf);
+        if (!ifaces[0].handle) {
+            fprintf(stderr, "pcap_open_offline: %s\n", errbuf);
             return 1;
         }
-
-        /* Verify Ethernet link layer */
-        if (pcap_datalink(ifaces[i].handle) != DLT_EN10MB) {
-            fprintf(stderr, "Device %s does not provide Ethernet headers\n",
-                    ifaces[i].name);
-            cleanup_all();
-            return 1;
-        }
-
-        /* Set capture direction if requested */
-        if (cfg.direction == 1) {
-            if (pcap_setdirection(ifaces[i].handle, PCAP_D_IN) == -1)
-                fprintf(stderr, "Warning: %s: cannot set direction to inbound: %s\n",
-                        ifaces[i].name, pcap_geterr(ifaces[i].handle));
-        } else if (cfg.direction == 2) {
-            if (pcap_setdirection(ifaces[i].handle, PCAP_D_OUT) == -1)
-                fprintf(stderr, "Warning: %s: cannot set direction to outbound: %s\n",
-                        ifaces[i].name, pcap_geterr(ifaces[i].handle));
-        }
-
-        /* Apply BPF filter */
+        snprintf(ifaces[0].name, sizeof(ifaces[0].name), "file");
+        iface_count = 1;
         if (cfg.filter_expr) {
-            if (apply_filter(ifaces[i].handle, ifaces[i].name,
-                             cfg.filter_expr) == -1) {
+            if (apply_filter(ifaces[0].handle, "file", cfg.filter_expr) == -1) {
                 cleanup_all();
                 return 1;
             }
+        }
+    } else {
+        /* Legacy positional argument support: pkt_monitor <device> */
+        if (iface_count == 0 && optind < argc) {
+            snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", argv[optind]);
+            iface_count = 1;
+        }
+
+        /* Auto-detect device if not specified */
+        if (iface_count == 0) {
+            pcap_if_t *alldevs;
+
+            if (pcap_findalldevs(&alldevs, errbuf) == -1 || alldevs == NULL) {
+                fprintf(stderr, "No capture device found: %s\n", errbuf);
+                return 1;
+            }
+            snprintf(ifaces[0].name, sizeof(ifaces[0].name), "%s", alldevs->name);
+            iface_count = 1;
+            pcap_freealldevs(alldevs);
+            if (!cfg.use_tui)
+                printf("# auto-detected device: %s\n", ifaces[0].name);
+        }
+
+        /* TUI requires ncurses */
+#ifndef HAS_NCURSES
+        if (cfg.use_tui) {
+            fprintf(stderr, "TUI mode not available. Rebuild with ncurses support.\n");
+            return 1;
+        }
+#endif
+
+        /*
+         * Open all capture devices.
+         * Adjust timeout per interface for fair round-robin.
+         */
+        timeout_ms = 100 / iface_count;
+        if (timeout_ms < 10) timeout_ms = 10;
+
+        for (i = 0; i < iface_count; i++) {
+            memset(&ifaces[i].pkt_cnt, 0, sizeof(packet_counter_t));
+            memset(&ifaces[i].total_cnt, 0, sizeof(packet_counter_t));
+            ifaces[i].elapsed_sec = 0;
+
+            ifaces[i].handle = pcap_open_live(ifaces[i].name, SNAP_LEN,
+                                              cfg.no_promisc ? 0 : 1,
+                                              timeout_ms, errbuf);
+            if (!ifaces[i].handle) {
+                fprintf(stderr, "pcap_open_live(%s): %s\n",
+                        ifaces[i].name, errbuf);
+                cleanup_all();
+                return 1;
+            }
+
+            /* Verify Ethernet link layer */
+            if (pcap_datalink(ifaces[i].handle) != DLT_EN10MB) {
+                fprintf(stderr, "Device %s does not provide Ethernet headers\n",
+                        ifaces[i].name);
+                cleanup_all();
+                return 1;
+            }
+
+            /* Set capture direction if requested */
+            if (cfg.direction == 1) {
+                if (pcap_setdirection(ifaces[i].handle, PCAP_D_IN) == -1)
+                    fprintf(stderr, "Warning: %s: cannot set direction to inbound: %s\n",
+                            ifaces[i].name, pcap_geterr(ifaces[i].handle));
+            } else if (cfg.direction == 2) {
+                if (pcap_setdirection(ifaces[i].handle, PCAP_D_OUT) == -1)
+                    fprintf(stderr, "Warning: %s: cannot set direction to outbound: %s\n",
+                            ifaces[i].name, pcap_geterr(ifaces[i].handle));
+            }
+
+            /* Apply BPF filter */
+            if (cfg.filter_expr) {
+                if (apply_filter(ifaces[i].handle, ifaces[i].name,
+                                 cfg.filter_expr) == -1) {
+                    cleanup_all();
+                    return 1;
+                }
+            }
+        }
+    }
+
+    /* Open pcap dumper for -w */
+    if (cfg.write_file) {
+        g_dumper = pcap_dump_open(ifaces[0].handle, cfg.write_file);
+        if (!g_dumper) {
+            fprintf(stderr, "pcap_dump_open: %s\n", pcap_geterr(ifaces[0].handle));
+            cleanup_all();
+            return 1;
         }
     }
 
@@ -676,9 +760,31 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* -r mode: process all packets from file and return */
+    if (cfg.read_file) {
+        pcap_loop(ifaces[0].handle, -1, packet_handler,
+                  (u_char *)&ifaces[0].pkt_cnt);
+        accumulate_totals(&ifaces[0]);
+        cleanup_all();
+        print_summary();
+        if (g_flow_stats)
+            flow_stats_print(g_flow_stats, cfg.top_n);
+        if (g_flow_stats)
+            flow_stats_cleanup(g_flow_stats);
+        if (g_dumper) {
+            pcap_dump_close(g_dumper);
+            g_dumper = NULL;
+        }
+        return 0;
+    }
+
 #ifdef HAS_NCURSES
     if (cfg.use_tui) {
         int ret = run_tui(&cfg);
+        if (g_dumper) {
+            pcap_dump_close(g_dumper);
+            g_dumper = NULL;
+        }
         cleanup_all();
         if (ret == 0)
             print_summary();
@@ -702,10 +808,18 @@ int main(int argc, char *argv[])
     }
     if (cfg.filter_expr)
         printf(" [filter: %s]", cfg.filter_expr);
+    if (cfg.no_promisc)
+        printf(" [no-promisc]");
+    else
+        printf(" [promisc]");
     printf("\n");
 
     {
         int ret = run_text(&cfg);
+        if (g_dumper) {
+            pcap_dump_close(g_dumper);
+            g_dumper = NULL;
+        }
         cleanup_all();
         if (ret == 0 && !cfg.json_mode && !cfg.csv_mode)
             print_summary();
