@@ -42,6 +42,10 @@ typedef struct {
     int         duration;       /* -t: seconds, 0=unlimited */
     double      alert_kbps;     /* -a: threshold, 0=disabled */
     int         top_n;          /* -T: 0=disabled */
+    int         no_promisc;     /* -p: disable promiscuous mode */
+    int         interval_ms;    /* -n: output interval in ms (default 1000) */
+    const char *write_file;     /* -w: pcap output file */
+    const char *read_file;      /* -r: pcap input file */
 } monitor_config_t;
 
 static inline void get_time_str(char *buf, size_t len)
