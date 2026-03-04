@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 
 #include "stats.h"
+#include "pkt_monitor.h"
 
 /* ---- well-known port names -------------------------------------------- */
 
@@ -29,7 +30,7 @@ static const port_name_t well_known[] = {
     { 0, NULL }
 };
 
-static const char *port_service_name(uint16_t port)
+const char *port_service_name(uint16_t port)
 {
     const port_name_t *p;
     for (p = well_known; p->name; p++)
